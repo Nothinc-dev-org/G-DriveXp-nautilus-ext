@@ -70,23 +70,27 @@ unsafe extern "C" fn update_file_info_impl(
     // Aplicar emblema según estado
     match status {
         Ok(crate::SyncStatus::Synced) => {
-            let emblem = str_to_cstring("emblem-default");
+            // Verde: sincronizado (local + drive)
+            let emblem = str_to_cstring("emblem-gdrivexp-synced");
             nautilus_file_info_add_emblem(file, emblem.as_ptr());
         }
-        Ok(crate::SyncStatus::Pending) => {
-            let emblem = str_to_cstring("emblem-important");
+        Ok(crate::SyncStatus::CloudOnly) => {
+            // Azul: solo en drive
+            let emblem = str_to_cstring("emblem-gdrivexp-cloud");
             nautilus_file_info_add_emblem(file, emblem.as_ptr());
         }
-        Ok(crate::SyncStatus::Syncing) => {
-            let emblem = str_to_cstring("emblem-synchronizing");
+        Ok(crate::SyncStatus::LocalOnly) => {
+            // Naranja: solo local (pendiente de subir)
+            let emblem = str_to_cstring("emblem-gdrivexp-local");
             nautilus_file_info_add_emblem(file, emblem.as_ptr());
         }
         Ok(crate::SyncStatus::Error) => {
-            let emblem = str_to_cstring("emblem-unreadable");
+            // Rojo: error
+            let emblem = str_to_cstring("emblem-gdrivexp-error");
             nautilus_file_info_add_emblem(file, emblem.as_ptr());
         }
         Ok(crate::SyncStatus::Unknown) | Err(_) => {
-            // No añadir emblema
+            // Sin emblema
         }
     }
     

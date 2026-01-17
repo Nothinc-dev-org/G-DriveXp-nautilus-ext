@@ -11,13 +11,17 @@ use gobject_sys::GTypeModule;
 use std::os::raw::c_int;
 
 /// Estado de sincronización (debe coincidir con src/ipc/mod.rs del daemon)
+/// - Synced: Local + Drive (verde)
+/// - CloudOnly: Solo en Drive, no descargado (azul)
+/// - LocalOnly: Solo local, pendiente de subir (naranja)
+/// - Error: Error de sincronización (rojo)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 pub enum SyncStatus {
-    Synced,
-    Syncing,
-    Pending,
-    Error,
-    Unknown,
+    Synced,      // Verde: en local y en drive
+    CloudOnly,   // Azul: solo en drive
+    LocalOnly,   // Naranja: solo local (pending upload)
+    Error,       // Rojo: error de sincronización
+    Unknown,     // Sin emblema
 }
 
 // ============================================================
