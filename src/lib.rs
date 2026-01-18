@@ -51,6 +51,6 @@ pub unsafe extern "C" fn nautilus_module_list_types(
     
     TYPE_LIST[0] = provider::get_type();
     
-    *types = TYPE_LIST.as_ptr();
+    *types = std::ptr::addr_of!(TYPE_LIST) as *const GType;
     *num_types = 1;
 }

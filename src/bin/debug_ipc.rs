@@ -5,12 +5,14 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 enum IpcRequest {
     GetFileStatus { path: String },
     Ping,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 enum IpcResponse {
     FileStatus(SyncStatus),
     Pong,
@@ -19,11 +21,11 @@ enum IpcResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum SyncStatus {
-    Synced,
-    Syncing,
-    Pending,
-    Error,
-    Unknown,
+    Synced,      // Verde: en local y en drive
+    CloudOnly,   // Azul: solo en drive
+    LocalOnly,   // Naranja: solo local (pending upload)
+    Error,       // Rojo: error de sincronización
+    Unknown,     // Sin emblema
 }
 
 fn main() -> std::io::Result<()> {

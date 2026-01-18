@@ -30,6 +30,7 @@ pub struct NautilusOperationHandle {
 /// Resultado de operaciones de InfoProvider
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum NautilusOperationResult {
     Complete = 0,
     Failed = 1,
@@ -71,6 +72,7 @@ extern "C" {
     // Funciones de NautilusFileInfo
     pub fn nautilus_file_info_get_uri(file_info: *mut NautilusFileInfo) -> *mut c_char;
     pub fn nautilus_file_info_add_emblem(file_info: *mut NautilusFileInfo, emblem_name: *const c_char);
+    #[allow(dead_code)]
     pub fn nautilus_file_info_is_directory(file_info: *mut NautilusFileInfo) -> glib_sys::gboolean;
     
     // Obtener el GType de NautilusInfoProvider
