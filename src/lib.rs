@@ -33,12 +33,20 @@ pub enum FileAvailability {
     NotTracked,
 }
 
+/// Datos completos de estado del archivo (debe coincidir con src/ipc/mod.rs del daemon)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileStatusData {
+    pub status: SyncStatus,
+    pub availability: FileAvailability,
+    pub is_shared: bool,
+}
+
 // ============================================================
 // Funciones exportadas requeridas por Nautilus
 // ============================================================
 
 // Helper de logging
-fn log_debug(msg: &str) {
+pub fn log_debug(msg: &str) {
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)

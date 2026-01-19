@@ -5,9 +5,12 @@ use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+use std::cell::RefCell;
+
 /// Cliente IPC que se comunica con el daemon vía Unix Socket
 pub struct IpcClient {
     socket_path: std::path::PathBuf,
+    stream: RefCell<Option<UnixStream>>,
 }
 
 impl IpcClient {
@@ -16,20 +19,30 @@ impl IpcClient {
         let uid = unsafe { libc::getuid() };
         let socket_path = std::path::PathBuf::from(format!("/run/user/{}/gdrivexp.sock", uid));
         
-        Self { socket_path }
+        crate::log_debug(&format!("IpcClient initialized. UID: {}, Socket Path: {:?}", uid, socket_path));
+        
+        Self { 
+            socket_path,
+            stream: RefCell::new(None),
+        }
     }
     
-    /// Consulta el estado de sincronización de un archivo
-    pub async fn get_file_status(&self, path: &str) -> io::Result<crate::SyncStatus> {
+    /// Consulta el estado de sincronización y compartido de un archivo
+    pub async fn get_extended_status(&self, path: &str) -> io::Result<crate::FileStatusData> {
         let request = IpcRequest::GetFileStatus {
             path: path.to_string(),
         };
         
         match self.send_request(request).await? {
-            IpcResponse::FileStatus(status) => Ok(status),  // CAMBIADO de Status a FileStatus
-            _ => Ok(crate::SyncStatus::Unknown),
+            IpcResponse::ExtendedStatus(data) => Ok(data),
+            _ => Ok(crate::FileStatusData {
+                status: crate::SyncStatus::Unknown,
+                availability: crate::FileAvailability::NotTracked,
+                is_shared: false,
+            }),
         }
     }
+
 
     
     /// Cambia archivo a online_only
@@ -57,27 +70,65 @@ impl IpcClient {
     }
 
     
-    /// Helper genérico para enviar requests
+    /// Helper genérico para enviar requests con reconexión automática
     async fn send_request(&self, request: IpcRequest) -> io::Result<IpcResponse> {
-        // Conectar al socket
-        let mut stream = match UnixStream::connect(&self.socket_path).await {
-            Ok(s) => s,
-            Err(_) => {
-                // Si no podemos conectar, el daemon no está corriendo
-                return Ok(IpcResponse::Error {
-                    message: "Daemon no disponible".to_string(),
-                });
-            }
-        };
-        
         // Serializar request
         let request_bytes = bincode::serialize(&request)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         
+        // Intentar usar la conexión existente o reconectar
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            
+            // Garantizar que tenemos una conexión
+            if self.stream.borrow().is_none() {
+                crate::log_debug(&format!("Connecting attempt {}", attempts));
+                match UnixStream::connect(&self.socket_path).await {
+                    Ok(s) => {
+                        crate::log_debug("Connected successfully");
+                        *self.stream.borrow_mut() = Some(s);
+                    },
+                    Err(e) => {
+                        crate::log_debug(&format!("Connection failed: {}", e));
+                        return Ok(IpcResponse::Error {
+                            message: "Daemon no disponible".to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Realizar I/O con borrow mutable del stream
+            // Necesitamos extraer temporalmente el stream o usar un alcance limitado
+            let mut stream_opt = self.stream.borrow_mut();
+            if let Some(stream) = stream_opt.as_mut() {
+                 match Self::perform_io(stream, &request_bytes).await {
+                     Ok(response) => return Ok(response),
+                     Err(_e) => {
+                         crate::log_debug(&format!("IO Error: {}", _e));
+                         // Si falló el I/O, el stream probablemente está roto
+                         // Lo eliminamos y reintentamos si no hemos excedido intentos
+                         // eprintln!("IPC Error (intento {}): {}", attempts, e);
+                     }
+                 }
+            }
+            
+            // Si llegamos aquí, invalidamos el stream
+            *stream_opt = None;
+            
+            if attempts >= 2 {
+                return Ok(IpcResponse::Error {
+                    message: "Error de comunicación IPC tras reintentos".to_string(),
+                });
+            }
+        }
+    }
+
+    async fn perform_io(stream: &mut UnixStream, request_bytes: &[u8]) -> io::Result<IpcResponse> {
         // Enviar longitud + request
         let len = (request_bytes.len() as u32).to_be_bytes();
         stream.write_all(&len).await?;
-        stream.write_all(&request_bytes).await?;
+        stream.write_all(request_bytes).await?;
         
         // Leer longitud de respuesta
         let mut len_buf = [0u8; 4];
@@ -96,10 +147,8 @@ impl IpcClient {
         stream.read_exact(&mut response_buf).await?;
         
         // Deserializar respuesta
-        let response: IpcResponse = bincode::deserialize(&response_buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        
-        Ok(response)
+        bincode::deserialize(&response_buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 }
 
@@ -117,6 +166,7 @@ enum IpcRequest {
 #[derive(Debug, Serialize, Deserialize)]
 enum IpcResponse {
     FileStatus(crate::SyncStatus),
+    ExtendedStatus(crate::FileStatusData),
     Pong,
     Availability(crate::FileAvailability),
     Success,  // ¡CAMBIADO de Ok a Success!
