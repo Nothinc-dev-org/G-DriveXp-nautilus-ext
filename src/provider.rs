@@ -5,14 +5,98 @@
 
 use crate::ffi::*;
 use crate::ipc_client::IpcClient;
-use gobject_sys::{GObject, GTypeInfo, GInterfaceInfo, GTypeModule};
+use gobject_sys::{GObject, GTypeInfo, GInterfaceInfo, GTypeModule, g_type_module_register_type, g_type_module_add_interface};
 use glib_sys::GType;
 use std::sync::OnceLock;
-use tokio::runtime::Runtime;
+use std::thread;
+use std::time::Duration;
+use crossbeam_channel::{bounded, Sender, Receiver};
 
-// Runtime de Tokio global para operaciones async
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-static IPC_CLIENT: OnceLock<IpcClient> = OnceLock::new();
+// ============================================================
+// IPC Worker Thread Architecture
+// ============================================================
+
+/// Request to the IPC worker
+struct IpcRequest {
+    uri: String,
+    response_tx: Sender<crate::SyncStatus>,
+}
+
+/// IPC worker that runs a dedicated thread with multi-threaded Tokio runtime
+struct IpcWorker {
+    request_tx: Sender<IpcRequest>,
+}
+
+impl IpcWorker {
+    fn new() -> Self {
+        let (request_tx, request_rx): (Sender<IpcRequest>, Receiver<IpcRequest>) = bounded(32);
+        
+        // Spawn dedicated worker thread
+        thread::spawn(move || {
+            // Single-threaded runtime is sufficient here because:
+            // 1. This runs in its own dedicated thread (not Nautilus main thread)
+            // 2. Requests are processed sequentially from the channel
+            // 3. More lightweight than multi-threaded runtime
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create IPC worker runtime");
+            
+            rt.block_on(async {
+                let client = IpcClient::new();
+                
+                while let Ok(req) = request_rx.recv() {
+                    // Query IPC with timeout
+                    let status = match tokio::time::timeout(
+                        Duration::from_millis(100),
+                        client.get_file_status(&req.uri)
+                    ).await {
+                        Ok(Ok(status)) => status,
+                        Ok(Err(_)) => crate::SyncStatus::Unknown,
+                        Err(_) => crate::SyncStatus::Unknown, // Timeout
+                    };
+                    
+                    // Send response back (ignore error if receiver dropped)
+                    let _ = req.response_tx.send(status);
+                }
+            });
+        });
+        
+        Self { request_tx }
+    }
+    
+    /// Query file status with timeout from main thread
+    fn query_status(&self, uri: &str, timeout: Duration) -> crate::SyncStatus {
+        let (response_tx, response_rx) = bounded(1);
+        
+        let request = IpcRequest {
+            uri: uri.to_string(),
+            response_tx,
+        };
+        
+        // Send request to worker
+        if self.request_tx.send(request).is_err() {
+            return crate::SyncStatus::Unknown;
+        }
+        
+        // Wait for response with timeout
+        match response_rx.recv_timeout(timeout) {
+            Ok(status) => status,
+            Err(_) => crate::SyncStatus::Unknown,
+        }
+    }
+}
+
+// Global IPC worker instance
+static IPC_WORKER: OnceLock<IpcWorker> = OnceLock::new();
+
+/// Public API for querying IPC status (used by menu_provider)
+pub fn ipc_query_status(uri: &str) -> Result<crate::SyncStatus, ()> {
+    let worker = IPC_WORKER.get_or_init(IpcWorker::new);
+    Ok(worker.query_status(uri, Duration::from_millis(50)))
+}
+
+// ============================================================
 
 /// GType de nuestra extensión (se registra en nautilus_module_initialize)
 static mut GDRIVEXP_PROVIDER_TYPE: GType = 0;
@@ -30,6 +114,10 @@ pub struct GDriveXPProvider {
 pub struct GDriveXPProviderClass {
     parent_class: gobject_sys::GObjectClass,
 }
+
+// ============================================================
+// Implementación de update_file_info
+// ============================================================
 
 // ============================================================
 // Implementación de update_file_info
@@ -53,43 +141,33 @@ unsafe extern "C" fn update_file_info_impl(
         return NautilusOperationResult::Complete;
     }
     
-    // Consultar estado de sincronización
-    let rt = RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create Tokio runtime")
-    });
-    
-    let client = IPC_CLIENT.get_or_init(IpcClient::new);
-    
-    let status = rt.block_on(async {
-        client.get_file_status(&uri).await
-    });
+    // Consultar estado usando worker (no bloquea el main thread más de 50ms)
+    let worker = IPC_WORKER.get_or_init(IpcWorker::new);
+    let status = worker.query_status(&uri, Duration::from_millis(50));
     
     // Aplicar emblema según estado
     match status {
-        Ok(crate::SyncStatus::Synced) => {
+        crate::SyncStatus::Synced => {
             // Verde: sincronizado (local + drive)
             let emblem = str_to_cstring("emblem-gdrivexp-synced");
             nautilus_file_info_add_emblem(file, emblem.as_ptr());
         }
-        Ok(crate::SyncStatus::CloudOnly) => {
+        crate::SyncStatus::CloudOnly => {
             // Azul: solo en drive
             let emblem = str_to_cstring("emblem-gdrivexp-cloud");
             nautilus_file_info_add_emblem(file, emblem.as_ptr());
         }
-        Ok(crate::SyncStatus::LocalOnly) => {
+        crate::SyncStatus::LocalOnly => {
             // Naranja: solo local (pendiente de subir)
             let emblem = str_to_cstring("emblem-gdrivexp-local");
             nautilus_file_info_add_emblem(file, emblem.as_ptr());
         }
-        Ok(crate::SyncStatus::Error) => {
+        crate::SyncStatus::Error => {
             // Rojo: error
             let emblem = str_to_cstring("emblem-gdrivexp-error");
             nautilus_file_info_add_emblem(file, emblem.as_ptr());
         }
-        Ok(crate::SyncStatus::Unknown) | Err(_) => {
+        crate::SyncStatus::Unknown => {
             // Sin emblema
         }
     }
@@ -166,6 +244,29 @@ pub unsafe fn register_type(module: *mut GTypeModule) {
         nautilus_info_provider_get_type(),
         &iface_info,
     );
+    
+    // Registrar NautilusMenuProvider
+    let menu_iface_info = GInterfaceInfo {
+        interface_init: Some(menu_provider_iface_init),
+        interface_finalize: None,
+        interface_data: std::ptr::null_mut(),
+    };
+    
+    g_type_module_add_interface(
+        module,
+        GDRIVEXP_PROVIDER_TYPE,
+        nautilus_menu_provider_get_type(),
+        &menu_iface_info,
+    );
+}
+
+unsafe extern "C" fn menu_provider_iface_init(
+    iface: glib_sys::gpointer,
+    _data: glib_sys::gpointer,
+) {
+    let iface = iface as *mut NautilusMenuProviderInterface;
+    (*iface).get_file_items = Some(crate::menu_provider::get_file_items_impl);
+    (*iface).get_background_items = None; // No implementamos background items
 }
 
 pub fn get_type() -> GType {

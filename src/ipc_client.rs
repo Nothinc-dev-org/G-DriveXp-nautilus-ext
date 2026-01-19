@@ -21,18 +21,53 @@ impl IpcClient {
     
     /// Consulta el estado de sincronización de un archivo
     pub async fn get_file_status(&self, path: &str) -> io::Result<crate::SyncStatus> {
+        let request = IpcRequest::GetFileStatus {
+            path: path.to_string(),
+        };
+        
+        match self.send_request(request).await? {
+            IpcResponse::FileStatus(status) => Ok(status),  // CAMBIADO de Status a FileStatus
+            _ => Ok(crate::SyncStatus::Unknown),
+        }
+    }
+
+    
+    /// Cambia archivo a online_only
+    pub async fn set_online_only(&self, path: &str) -> io::Result<bool> {
+        let request = IpcRequest::SetOnlineOnly {
+            path: path.to_string(),
+        };
+        
+        match self.send_request(request).await? {
+            IpcResponse::Success => Ok(true),  // CAMBIADO de Ok a Success
+            _ => Ok(false),
+        }
+    }
+    
+    /// Cambia archivo a local_online
+    pub async fn set_local_online(&self, path: &str) -> io::Result<bool> {
+        let request = IpcRequest::SetLocalOnline {
+            path: path.to_string(),
+        };
+        
+        match self.send_request(request).await? {
+            IpcResponse::Success => Ok(true),  // CAMBIADO de Ok a Success
+            _ => Ok(false),
+        }
+    }
+
+    
+    /// Helper genérico para enviar requests
+    async fn send_request(&self, request: IpcRequest) -> io::Result<IpcResponse> {
         // Conectar al socket
         let mut stream = match UnixStream::connect(&self.socket_path).await {
             Ok(s) => s,
             Err(_) => {
                 // Si no podemos conectar, el daemon no está corriendo
-                return Ok(crate::SyncStatus::Unknown);
+                return Ok(IpcResponse::Error {
+                    message: "Daemon no disponible".to_string(),
+                });
             }
-        };
-        
-        // Construir request
-        let request = IpcRequest::GetFileStatus {
-            path: path.to_string(),
         };
         
         // Serializar request
@@ -64,28 +99,27 @@ impl IpcClient {
         let response: IpcResponse = bincode::deserialize(&response_buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         
-        match response {
-            IpcResponse::FileStatus(status) => Ok(status),
-            IpcResponse::Error { .. } => Ok(crate::SyncStatus::Unknown),
-            _ => Ok(crate::SyncStatus::Unknown),
-        }
+        Ok(response)
     }
 }
 
-/// Request IPC (debe coincidir con src/ipc/mod.rs)
-#[derive(Debug, Clone, Serialize)]
+/// Request IPC (debe coincidir EXACTAMENTE con src/ipc/mod.rs del daemon)
+#[derive(Debug, Serialize, Deserialize)]
 enum IpcRequest {
     GetFileStatus { path: String },
-    #[allow(dead_code)]
     Ping,
+    SetOnlineOnly { path: String },
+    SetLocalOnline { path: String },
+    GetFileAvailability { path: String },
 }
 
-/// Respuesta IPC (debe coincidir con src/ipc/mod.rs)
-#[derive(Debug, Clone, Deserialize)]
+/// Respuesta IPC (debe coincidir EXACTAMENTE con src/ipc/mod.rs del daemon)
+#[derive(Debug, Serialize, Deserialize)]
 enum IpcResponse {
     FileStatus(crate::SyncStatus),
-    #[allow(dead_code)]
     Pong,
-    #[allow(dead_code)]
+    Availability(crate::FileAvailability),
+    Success,  // ¡CAMBIADO de Ok a Success!
     Error { message: String },
 }
+
