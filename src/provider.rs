@@ -52,7 +52,7 @@ impl IpcWorker {
                         crate::log_debug(&format!("Worker received request: {}", req.uri));
                         // Query IPC with timeout
                         let status_data = match tokio::time::timeout(
-                            Duration::from_millis(100),
+                            Duration::from_millis(200),
                             client.get_extended_status(&req.uri)
                         ).await {
                             Ok(Ok(data)) => data,
@@ -178,6 +178,7 @@ unsafe extern "C" fn update_file_info_impl(
     // Consultar estado usando worker (no bloquea el main thread más de 50ms)
     let worker = IPC_WORKER.get_or_init(IpcWorker::new);
     let data = worker.query_extended_status(&uri, Duration::from_millis(50));
+    crate::log_debug(&format!("Status: {:?}, Shared: {}", data.status, data.is_shared));
     
     // NUEVO: Aplicar emblema de compartido si corresponde
     // Se añade primero para que quede visualmente "abajo" del emblema de estado (el último añadido queda arriba)
