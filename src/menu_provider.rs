@@ -21,97 +21,87 @@ fn log_debug(msg: &str) {
     }
 }
 
-/// Callback para get_file_items
+/// Callback para get_file_items (soporta selección múltiple)
 pub unsafe extern "C" fn get_file_items_impl(
     _provider: *mut GObject,
     files: *mut glib_sys::GList,
 ) -> *mut glib_sys::GList {
-    log_debug("v3: get_file_items_impl called");
+    log_debug("v4: get_file_items_impl called");
 
-    // 1. Solo procesar si hay exactamente 1 archivo seleccionado
-    let file_count = g_list_length(files);
-    if file_count != 1 {
-        log_debug(&format!("Ignored: file_count = {}", file_count));
-        return std::ptr::null_mut();
-    }
-    
-    // 2. Obtener primer archivo de la lista
     if files.is_null() {
         return std::ptr::null_mut();
     }
-    let file = (*files).data as *mut NautilusFileInfo;
-    
-    // 3. Obtener URI
-    let uri_ptr = nautilus_file_info_get_uri(file);
-    let uri = match gchar_to_string_free(uri_ptr) {
-        Some(u) => u,
-        None => return std::ptr::null_mut(),
-    };
-    
-    log_debug(&format!("URI: {}", uri));
 
-    // Solo procesar file://
-    if !uri.starts_with("file://") {
-        log_debug("Ignored: not file://");
+    let file_count = g_list_length(files);
+    if file_count == 0 {
         return std::ptr::null_mut();
     }
-    
-    // 4. Decodificar URI a Path local
-    let path_str = uri.strip_prefix("file://").unwrap_or(&uri);
-    let _decoded_path = match percent_decode_str(path_str).decode_utf8() {
-        Ok(p) => p.into_owned(),
-        Err(e) => {
-            log_debug(&format!("Error decoding path: {:?}", e));
-            return std::ptr::null_mut();
+
+    log_debug(&format!("v4: file_count = {}", file_count));
+
+    // 1. Recolectar URIs de todos los archivos seleccionados
+    let mut free_uris: Vec<String> = Vec::new();   // Synced → pueden liberar espacio
+    let mut download_uris: Vec<String> = Vec::new(); // CloudOnly → pueden descargar
+
+    let mut node = files;
+    while !node.is_null() {
+        let file = (*node).data as *mut NautilusFileInfo;
+        let uri_ptr = nautilus_file_info_get_uri(file);
+        if let Some(uri) = gchar_to_string_free(uri_ptr) {
+            if uri.starts_with("file://") {
+                let path_str = uri.strip_prefix("file://").unwrap_or(&uri);
+                // Validar que el path se puede decodificar
+                if percent_decode_str(path_str).decode_utf8().is_ok() {
+                    match crate::provider::ipc_query_status(&uri).ok() {
+                        Some(SyncStatus::Synced) => {
+                            log_debug(&format!("v4: {} -> Synced (can free)", uri));
+                            free_uris.push(uri);
+                        }
+                        Some(SyncStatus::CloudOnly) => {
+                            log_debug(&format!("v4: {} -> CloudOnly (can download)", uri));
+                            download_uris.push(uri);
+                        }
+                        other => {
+                            log_debug(&format!("v4: {} -> {:?} (skip)", uri, other));
+                        }
+                    }
+                }
+            }
         }
-    };
-    
-    // 5. Consultar estado REAL via IPC usando worker compartido
-    let sync_status = crate::provider::ipc_query_status(&uri).ok();
-    
-    log_debug(&format!("v3: IPC SyncStatus = {:?}", sync_status));
-    
-    let mut items: *mut glib_sys::GList = std::ptr::null_mut();
-    
-    match sync_status {
-        Some(SyncStatus::Synced) => {
-            // Archivo completamente sincronizado localmente -> Opción: "Liberar espacio"
-            log_debug("v3: Showing 'Liberar espacio' (Synced)");
-            let item = create_menu_item(
-                "gdrivexp::free_space",
-                "Liberar espacio",
-                "Eliminar copia local, mantener en la nube",
-                "weather-few-clouds-symbolic",
-            );
-            
-            let uri_boxed = Box::into_raw(Box::new(uri)) as gpointer;
-            connect_activate(item, free_space_callback, uri_boxed);
-            items = g_list_append(items, item as gpointer);
-        }
-        Some(SyncStatus::CloudOnly) => {
-            // Archivo solo en la nube -> Opción: "Mantener siempre local"
-            log_debug("v3: Showing 'Mantener siempre local' (CloudOnly)");
-            let item = create_menu_item(
-                "gdrivexp::keep_local",
-                "Mantener siempre local",
-                "Descargar y mantener copia local",
-                "folder-download-symbolic",
-            );
-            
-            let uri_boxed = Box::into_raw(Box::new(uri)) as gpointer;
-            connect_activate(item, keep_local_callback, uri_boxed);
-            items = g_list_append(items, item as gpointer);
-        }
-        Some(SyncStatus::LocalOnly) => {
-            // Archivo solo local (pendiente de subir) - no mostrar opciones
-            log_debug("v3: No menu for LocalOnly");
-        }
-        _ => {
-            // Unknown o error de IPC - no mostrar opciones
-            log_debug("v3: No menu (Unknown/Error)");
-        }
+        node = (*node).next;
     }
-    
+
+    // 2. Construir menú según los estados encontrados
+    let mut items: *mut glib_sys::GList = std::ptr::null_mut();
+
+    if !free_uris.is_empty() {
+        log_debug(&format!("v4: Showing 'Liberar espacio' for {} files", free_uris.len()));
+        let item = create_menu_item(
+            "gdrivexp::free_space",
+            "Liberar espacio",
+            "Eliminar copia local, mantener en la nube",
+            "weather-few-clouds-symbolic",
+        );
+
+        let uris_boxed = Box::into_raw(Box::new(free_uris)) as gpointer;
+        connect_activate(item, free_space_callback, uris_boxed);
+        items = g_list_append(items, item as gpointer);
+    }
+
+    if !download_uris.is_empty() {
+        log_debug(&format!("v4: Showing 'Mantener siempre local' for {} files", download_uris.len()));
+        let item = create_menu_item(
+            "gdrivexp::keep_local",
+            "Mantener siempre local",
+            "Descargar y mantener copia local",
+            "folder-download-symbolic",
+        );
+
+        let uris_boxed = Box::into_raw(Box::new(download_uris)) as gpointer;
+        connect_activate(item, keep_local_callback, uris_boxed);
+        items = g_list_append(items, item as gpointer);
+    }
+
     items
 }
 
@@ -166,11 +156,11 @@ unsafe fn connect_activate(
 
 unsafe extern "C" fn free_user_data(data: gpointer, _closure: *mut gobject_sys::GClosure) {
     if !data.is_null() {
-        let ptr = data as *mut String;
-        log_debug(&format!("v3: free_user_data called for {:?}", ptr));
+        let ptr = data as *mut Vec<String>;
+        log_debug(&format!("v4: free_user_data called for {:?}", ptr));
         drop(Box::from_raw(ptr));
     } else {
-        log_debug("v3: free_user_data called with NULL");
+        log_debug("v4: free_user_data called with NULL");
     }
 }
 
@@ -181,22 +171,24 @@ unsafe extern "C" fn free_space_callback(
     user_data: gpointer,
 ) {
     if user_data.is_null() { return; }
-    
-    let uri = unsafe { &*(user_data as *const String) }.clone();
-    
+
+    let uris = unsafe { &*(user_data as *const Vec<String>) }.clone();
+
     // Spawn thread to avoid blocking Nautilus UI
     thread::spawn(move || {
-        log_debug(&format!("v3: Action Thread Started: Free space for {}", uri));
+        log_debug(&format!("v4: Action Thread Started: Free space for {} files", uris.len()));
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-            
+
         rt.block_on(async {
-            let client = IpcClient::new(); // Create new client per thread is cheap
-            match client.set_online_only(&uri).await {
-                Ok(_) => log_debug("IPC Success: Set Online Only"),
-                Err(e) => log_debug(&format!("IPC Error: {:?}", e)),
+            let client = IpcClient::new();
+            for uri in &uris {
+                match client.set_online_only(uri).await {
+                    Ok(_) => log_debug(&format!("IPC Success: Set Online Only for {}", uri)),
+                    Err(e) => log_debug(&format!("IPC Error for {}: {:?}", uri, e)),
+                }
             }
         });
     });
@@ -207,22 +199,24 @@ unsafe extern "C" fn keep_local_callback(
     user_data: gpointer,
 ) {
     if user_data.is_null() { return; }
-    
-    let uri = unsafe { &*(user_data as *const String) }.clone();
-    
+
+    let uris = unsafe { &*(user_data as *const Vec<String>) }.clone();
+
     // Spawn thread to avoid blocking Nautilus UI
     thread::spawn(move || {
-        log_debug(&format!("v2: Action Thread Started: Keep local for {}", uri));
+        log_debug(&format!("v4: Action Thread Started: Keep local for {} files", uris.len()));
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-            
+
         rt.block_on(async {
             let client = IpcClient::new();
-            match client.set_local_online(&uri).await {
-                Ok(_) => log_debug("IPC Success: Set Local Online"),
-                Err(e) => log_debug(&format!("IPC Error: {:?}", e)),
+            for uri in &uris {
+                match client.set_local_online(uri).await {
+                    Ok(_) => log_debug(&format!("IPC Success: Set Local Online for {}", uri)),
+                    Err(e) => log_debug(&format!("IPC Error for {}: {:?}", uri, e)),
+                }
             }
         });
     });
