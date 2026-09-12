@@ -91,9 +91,10 @@ impl IpcClient {
                     },
                     Err(e) => {
                         crate::log_debug(&format!("Connection failed: {}", e));
-                        return Ok(IpcResponse::Error {
-                            message: "Daemon no disponible".to_string(),
-                        });
+                        // Fallo de transporte (socket ausente, daemon caído):
+                        // se propaga como Err para NO colapsar con "no rastreado".
+                        // Se conserva el kind original para clasificarlo arriba.
+                        return Err(io::Error::new(e.kind(), format!("daemon no disponible: {}", e)));
                     }
                 }
             }
@@ -117,9 +118,12 @@ impl IpcClient {
             *stream_opt = None;
             
             if attempts >= 2 {
-                return Ok(IpcResponse::Error {
-                    message: "Error de comunicación IPC tras reintentos".to_string(),
-                });
+                // Reintentos agotados (daemon murió a mitad de la conversación):
+                // Err, no Ok(Error), por la misma razón de arriba.
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "Error de comunicación IPC tras reintentos",
+                ));
             }
         }
     }

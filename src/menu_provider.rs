@@ -46,6 +46,10 @@ pub unsafe extern "C" fn get_file_items_impl(
     let mut node = files;
     while !node.is_null() {
         let file = (*node).data as *mut NautilusFileInfo;
+        if file.is_null() {
+            node = (*node).next;
+            continue;
+        }
         let uri_ptr = nautilus_file_info_get_uri(file);
         if let Some(uri) = gchar_to_string_free(uri_ptr) {
             if uri.starts_with("file://") {
@@ -177,17 +181,24 @@ unsafe extern "C" fn free_space_callback(
     // Spawn thread to avoid blocking Nautilus UI
     thread::spawn(move || {
         log_debug(&format!("v4: Action Thread Started: Free space for {} files", uris.len()));
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                log_debug(&format!("v4: no se pudo crear runtime: {}", e));
+                return;
+            }
+        };
 
         rt.block_on(async {
             let client = IpcClient::new();
             for uri in &uris {
                 match client.set_online_only(uri).await {
-                    Ok(_) => log_debug(&format!("IPC Success: Set Online Only for {}", uri)),
-                    Err(e) => log_debug(&format!("IPC Error for {}: {:?}", uri, e)),
+                    Ok(true) => log_debug(&format!("IPC Success: Set Online Only for {}", uri)),
+                    Ok(false) => log_debug(&format!("IPC rechazado por el daemon para {} (sin cambios)", uri)),
+                    Err(e) => log_debug(&format!("IPC Error for {}: {:?} (daemon inalcanzable?)", uri, e)),
                 }
             }
         });
@@ -205,17 +216,24 @@ unsafe extern "C" fn keep_local_callback(
     // Spawn thread to avoid blocking Nautilus UI
     thread::spawn(move || {
         log_debug(&format!("v4: Action Thread Started: Keep local for {} files", uris.len()));
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                log_debug(&format!("v4: no se pudo crear runtime: {}", e));
+                return;
+            }
+        };
 
         rt.block_on(async {
             let client = IpcClient::new();
             for uri in &uris {
                 match client.set_local_online(uri).await {
-                    Ok(_) => log_debug(&format!("IPC Success: Set Local Online for {}", uri)),
-                    Err(e) => log_debug(&format!("IPC Error for {}: {:?}", uri, e)),
+                    Ok(true) => log_debug(&format!("IPC Success: Set Local Online for {}", uri)),
+                    Ok(false) => log_debug(&format!("IPC rechazado por el daemon para {} (sin cambios)", uri)),
+                    Err(e) => log_debug(&format!("IPC Error for {}: {:?} (daemon inalcanzable?)", uri, e)),
                 }
             }
         });

@@ -98,7 +98,7 @@ pub struct NautilusMenuProviderInterface {
 // ============================================================
 
 #[link(name = "nautilus-extension")]
-extern "C" {
+unsafe extern "C" {
     // Funciones de NautilusFileInfo
     pub fn nautilus_file_info_get_uri(file_info: *mut NautilusFileInfo) -> *mut c_char;
     pub fn nautilus_file_info_add_emblem(file_info: *mut NautilusFileInfo, emblem_name: *const c_char);
@@ -125,12 +125,12 @@ extern "C" {
 // ============================================================
 
 #[link(name = "glib-2.0")]
-extern "C" {
+unsafe extern "C" {
     pub fn g_free(mem: gpointer);
 }
 
 #[link(name = "gobject-2.0")]
-extern "C" {
+unsafe extern "C" {
     #[allow(dead_code)]
     pub fn g_type_module_register_type(
         module: *mut GTypeModule,
@@ -163,7 +163,7 @@ extern "C" {
 // ============================================================
 
 #[link(name = "glib-2.0")]
-extern "C" {
+unsafe extern "C" {
     pub fn g_list_append(
         list: *mut glib_sys::GList,
         data: gpointer,

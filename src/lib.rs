@@ -10,6 +10,7 @@ pub mod menu_provider;
 use glib_sys::GType;
 use gobject_sys::GTypeModule;
 use std::os::raw::c_int;
+use std::sync::OnceLock;
 
 /// Estado de sincronización (debe coincidir con src/ipc/mod.rs del daemon)
 /// - Synced: Local + Drive (verde)
@@ -58,7 +59,7 @@ pub fn log_debug(msg: &str) {
 }
 
 /// Llamada cuando la extensión es cargada
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nautilus_module_initialize(module: *mut GTypeModule) {
     log_debug("nautilus_module_initialize called");
     // Registrar nuestro tipo GDriveXPProvider
@@ -67,24 +68,25 @@ pub unsafe extern "C" fn nautilus_module_initialize(module: *mut GTypeModule) {
 }
 
 /// Llamada cuando la extensión es descargada
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nautilus_module_shutdown() {
     log_debug("nautilus_module_shutdown called");
     // Cleanup si es necesario
 }
 
 /// Nautilus llama esto para obtener los tipos que exportamos
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nautilus_module_list_types(
     types: *mut *const GType,
     num_types: *mut c_int,
 ) {
     log_debug("nautilus_module_list_types called");
-    static mut TYPE_LIST: [GType; 1] = [0];
-    
-    TYPE_LIST[0] = provider::get_type();
-    
-    *types = std::ptr::addr_of!(TYPE_LIST) as *const GType;
+    // OnceLock en vez de static mut: Nautilus conserva el puntero, pero solo
+    // se escribe una vez en carga single-thread; así no hay data race posible.
+    static TYPE_LIST: OnceLock<[GType; 1]> = OnceLock::new();
+    let list = TYPE_LIST.get_or_init(|| [provider::get_type()]);
+
+    *types = list.as_ptr();
     *num_types = 1;
     log_debug("types listed");
 }
